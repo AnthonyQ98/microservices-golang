@@ -8,13 +8,20 @@ import (
 	"os"
 	"time"
 
+	"broker/logs"
+
 	amqp "github.com/rabbitmq/amqp091-go"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 const webPort = "80"
 
 type Config struct {
-	Rabbit *amqp.Connection
+	Rabbit     *amqp.Connection
+	GRPCClient logs.LogServiceClient
+	GRPCConn   *grpc.ClientConn
+	HTTPClient *http.Client
 }
 
 func main() {
@@ -25,8 +32,40 @@ func main() {
 	}
 	defer rabbitconn.Close()
 
+	// Connect to gRPC service (reuse connection)
+	grpcConn, err := grpc.Dial("logger-service:50001", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Printf("Warning: Failed to connect to gRPC service: %v\n", err)
+		log.Println("gRPC features will be unavailable")
+	} else {
+		log.Println("Connected to gRPC logger service")
+	}
+	defer func() {
+		if grpcConn != nil {
+			grpcConn.Close()
+		}
+	}()
+
+	var grpcClient logs.LogServiceClient
+	if grpcConn != nil {
+		grpcClient = logs.NewLogServiceClient(grpcConn)
+	}
+
+	// Create HTTP client with connection pooling
+	httpClient := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+
 	app := Config{
-		Rabbit: rabbitconn,
+		Rabbit:     rabbitconn,
+		GRPCClient: grpcClient,
+		GRPCConn:   grpcConn,
+		HTTPClient: httpClient,
 	}
 
 	log.Printf("Starting broker service on port %s\n", webPort)
