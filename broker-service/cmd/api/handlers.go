@@ -11,8 +11,6 @@ import (
 	"net/rpc"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type AuthPayload struct {
@@ -82,9 +80,7 @@ func (app *Config) logItem(w http.ResponseWriter, entry LogPayload) {
 
 	request.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-
-	response, err := client.Do(request)
+	response, err := app.HTTPClient.Do(request)
 	if err != nil {
 		app.errorJSON(w, err)
 		return
@@ -103,6 +99,16 @@ func (app *Config) logItem(w http.ResponseWriter, entry LogPayload) {
 
 	app.writeJSON(w, http.StatusAccepted, payload)
 
+}
+
+func (app *Config) logItemHTTP(w http.ResponseWriter, r *http.Request) {
+	var requestPayload RequestPayload
+	err := app.readJSON(w, r, &requestPayload)
+	if err != nil {
+		app.errorJSON(w, err)
+		return
+	}
+	app.logItem(w, requestPayload.Log)
 }
 
 func (app *Config) authenticate(w http.ResponseWriter, a AuthPayload) {
@@ -206,6 +212,16 @@ func (app *Config) logEventViaRabbit(w http.ResponseWriter, l LogPayload) {
 
 }
 
+func (app *Config) logEventViaRabbitHTTP(w http.ResponseWriter, r *http.Request) {
+	var requestPayload RequestPayload
+	err := app.readJSON(w, r, &requestPayload)
+	if err != nil {
+		app.errorJSON(w, err)
+		return
+	}
+	app.logEventViaRabbit(w, requestPayload.Log)
+}
+
 func (app *Config) pushToQueue(name, msg string) error {
 	emitter, err := event.NewEventEmitter(app.Rabbit)
 	if err != nil {
@@ -264,20 +280,18 @@ func (app *Config) LogViaGRPC(w http.ResponseWriter, r *http.Request) {
 	err := app.readJSON(w, r, &requestPayload)
 	if err != nil {
 		app.errorJSON(w, err)
+		return
 	}
 
-	conn, err := grpc.Dial("logger-service:50001", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	if err != nil {
-		app.errorJSON(w, err)
+	if app.GRPCClient == nil {
+		app.errorJSON(w, errors.New("gRPC client not available"))
+		return
 	}
 
-	defer conn.Close()
-
-	c := logs.NewLogServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, err = c.WriteLog(ctx, &logs.LogRequest{
+	_, err = app.GRPCClient.WriteLog(ctx, &logs.LogRequest{
 		LogEntry: &logs.Log{
 			Name: requestPayload.Log.Name,
 			Data: requestPayload.Log.Data,
@@ -285,6 +299,7 @@ func (app *Config) LogViaGRPC(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		app.errorJSON(w, err)
+		return
 	}
 
 	var payload jsonResponse
